@@ -1,7 +1,7 @@
 """
 A fully parallel implementation of the Vanilla Policy Gradient
 algorithm described in OpenAI's Spinning Up resource.
-Does not yet implement reward-to-go or generalized advantage estimation.
+Implements reward-to-go but not generalized advantage estimation.
 
 Parallelization is automated by the gymnasium package, maintained
 by the Farama Foundation.
