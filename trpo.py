@@ -21,6 +21,10 @@ for 7 episodes in a row (100-106), meaning that all 32 rollouts in the batch
 achieved the maximum CartPole-v1 reward for 7 batches in a row.
 This degree of consistency was not seen with VPG, which makes sense
 as the TRPO updates are much more carefully chosen.
+
+Note: Policy performance still crashes quite often.
+This is unlike VPG which seems to learn more consistently
+in the initial stages.
 """
 
 import torch
@@ -29,6 +33,7 @@ import gymnasium as gym
 import model
 
 problem = 'CartPole-v1'
+threshold = 475
 obs_dim = 4
 act_dim = 2
 batch_size = 32
@@ -65,7 +70,8 @@ def play_episode():
     # type_dim e.g. obs_dim or act_dim if multi-dimensional action space
     return obs_seq[:-1], act_seq[1:], rew_seq[1:], torch.logical_not(mask_seq[:-1])
 
-def trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not_mask):
+def trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, lr_kick,
+        obs_seq, act_seq, rew_seq, not_mask):
     """
     The TRPO update is not as simple as computing a loss function and calling
     .backward to populate the gradients of the policy network.
@@ -189,7 +195,12 @@ def trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, re
             j += 1
 
     print("No valid TRPO update found within backtracking limit.")
-    return total_weights.sum() / batch_size
+    # Kick with vanilla policy gradient if reward not significant
+    avg_rew = total_weights.sum() / batch_size
+    # if avg_rew < threshold:
+    #     for p, ge in zip(logits_net.parameters(), g):
+    #             p.data -= lr_kick * ge
+    return avg_rew
 
 
 
@@ -213,6 +224,7 @@ cg_iters = 50
 back_coeff = 0.8
 back_lim = 10
 kl_div_lim = 0.01
+lr_kick = 3e-4
 
 def train():
     logits_net.train()
@@ -224,7 +236,8 @@ def train():
             print(f"Episode {ep:>5d}/{episodes:>5d}")
             print(f"Average reward = {avg_rew.item():>7f}\n")
 
-        trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, obs, act, rew, mask)
+        trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, lr_kick,
+                obs, act, rew, mask)
 
 def test():
     logits_net.eval()

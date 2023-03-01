@@ -21,7 +21,7 @@ With reward-to-go, the required episodes drop to less than 50-100,
 although the variance of the resulting model is larger.
 The reward-to-go implementation can achieve a mean reward of 490.8
 with variance 22.4.
-In 50 episodes, the average reward is already over 400.
+In 50 episodes, the average reward is typically already over 250.
 This is an improvement over the total reward weight, which sits at
 just 140 average reward after 50 episodes.
 """
@@ -86,7 +86,7 @@ def vpg_loss(obs_seq, act_seq, rew_seq, mask_seq):
     # Depending on the weights, make sure to report _ , average reward here
 
 
-episodes = 1000
+episodes = 150
 optimizer = torch.optim.Adam(logits_net.parameters())
 
 def train():
@@ -94,8 +94,7 @@ def train():
     for ep in range(episodes):
         obs, act, rew, mask = play_episode()
         loss, avg_rew = vpg_loss(obs, act, rew, mask)
-        if avg_rew.item() > 490:
-            break 
+        # No safeguards against overtraining
         # Overtraining an already-strong policy can lead to instability
         optimizer.zero_grad()
         loss.backward()
