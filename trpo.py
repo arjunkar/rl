@@ -9,6 +9,18 @@ Each batch of batch_size rollouts is played simultaneously before the
 policy is updated in a single "episode".
 
 CartPole-v1 Results:
+TRPO updates are considerably slower than VPG.
+However, the performance difference is notable.
+After 100 episodes, TRPO hits the CartPole-v1 ceiling
+of 500 reward and shows no instability or notable regression
+in policy performance.
+VPG, on the other hand, hit a ceiling and needed to be cut off
+by hand to prevent significant regression.
+Incredibly, the TRPO agent achieved an *average reward* of 500
+for 7 episodes in a row (100-106), meaning that all 32 rollouts in the batch
+achieved the maximum CartPole-v1 reward for 7 batches in a row.
+This degree of consistency was not seen with VPG, which makes sense
+as the TRPO updates are much more carefully chosen.
 """
 
 import torch
@@ -53,7 +65,7 @@ def play_episode():
     # type_dim e.g. obs_dim or act_dim if multi-dimensional action space
     return obs_seq[:-1], act_seq[1:], rew_seq[1:], torch.logical_not(mask_seq[:-1])
 
-def trpo_update(back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not_mask):
+def trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not_mask):
     """
     The TRPO update is not as simple as computing a loss function and calling
     .backward to populate the gradients of the policy network.
@@ -78,8 +90,10 @@ def trpo_update(back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not
     total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
     weights = total_weights - (rew_seq*not_mask).cumsum(dim=0)
 
-    # Gradient of surrogate advantage is equivalent to the vanilla policy gradient
-    vpg_loss = sample_surr_adv(prob_seq_old, prob_seq_old, weights, not_mask)
+    # Vanilla policy gradient
+    log_prob_seq = policy_old.log_prob(act_seq)
+    log_probs = log_prob_seq * not_mask
+    vpg_loss = (log_probs * weights).sum() / batch_size
     # Manually zero grad
     for p in logits_net.parameters():
         p.grad = None
@@ -87,27 +101,30 @@ def trpo_update(back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not
     vpg_loss.backward()
     
     # Store policy gradient g in auxiliary list
-    g = [p.grad for p in logits_net.parameters()]
+    g = [p.grad.detach() for p in logits_net.parameters()]
 
     # Create x data for auxiliary conjugate gradient problem x = H^{-1}g
     x = [torch.zeros_like(p) for p in logits_net.parameters()]
-    
+
+    # Rebuild the full graph
+    logits_old = logits_net(obs_seq)
     # First derivative of relative entropy
     kl_deriv = torch.autograd.grad(
                     sample_kl_div(logits_old, logits_old, not_mask), 
                     logits_net.parameters(),
-                    create_graph=True
+                    create_graph=True # Allow for second derivative
                 )
 
     # Use torch.autograd.grad to double-differentiate
-    def compute_Hvec(inp):
+    def compute_Hvec(vec):
         return torch.autograd.grad(
                 kl_deriv,
                 logits_net.parameters(), 
-                grad_outputs=inp
+                grad_outputs=vec,
+                retain_graph=True
             )
 
-    # Inner products between lists of tensor parameters
+    # Inner products between iterables of tensor parameters
     def inner(v1, v2):
         return sum([(v1e * v2e).sum() for v1e, v2e in zip(v1, v2)])
     # Addition and subtraction of two iterables of tensor parameters
@@ -120,26 +137,35 @@ def trpo_update(back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not
         return [(scalar * ve) for ve in v]
     # Approximate equality testing
     def equal(v1, v2):
-        return all([torch.allclose(v1e, v2e) for v1e, v2e in zip(v1, v2)])
+        return all([torch.allclose(v1e, v2e, atol=1e-3) for v1e, v2e in zip(v1, v2)])
 
-    # Set up initial conjugate gradient parameters r, d
+    # Set up initial conjugate gradient parameters d, r
     Hx = compute_Hvec(x)
     d = sub(g, Hx)
     r = sub(g, Hx)
 
     # Run conjugate gradient algorithm, updating x until close to H^{-1}g
-    while not equal(Hx, g):
+    # or out of iterations
+    iter = 0
+    while not equal(Hx, g) and iter < cg_iters:
+        # Debugging purposes
+        objective = inner(x, Hx) - 2*inner(g, x)
+
         beta_denom = inner(r, r)
         Hd = compute_Hvec(d)
+
         alpha = beta_denom / inner(d, Hd)
+
         x = add(x, mult(alpha, d))
         r = sub(r, mult(alpha, Hd))
         beta = inner(r, r) / beta_denom
         d = add(r, mult(beta, d))
+
         Hx = compute_Hvec(x)
+        iter += 1
     
     # Backtracking line search for valid update
-    update_coeff = (2*kl_div_lim / inner(x, Hx))**0.5
+    update_coeff = (2*kl_div_lim / inner(x, compute_Hvec(x)))**0.5
 
     j = 0
     while j < back_lim:
@@ -154,13 +180,17 @@ def trpo_update(back_coeff, back_lim, kl_div_lim, obs_seq, act_seq, rew_seq, not
         kl_div = sample_kl_div(logits_new, logits_old, not_mask)
 
         if surr_adv > 0 and kl_div < kl_div_lim:
-            break # Valid update found and taken
+            # Valid update found and taken
+            return total_weights.sum() / batch_size
         else:
+            # Undo trial update and prepare for subsequent attempt
             for p, xe in zip(logits_net.parameters(), x):
                 p.data -= (back_coeff**j) * update_coeff * xe
-        j += 1
+            j += 1
 
     print("No valid TRPO update found within backtracking limit.")
+    return total_weights.sum() / batch_size
+
 
 
 def sample_surr_adv(prob_seq_new, prob_seq_old, weights, not_mask):
@@ -179,14 +209,29 @@ def sample_kl_div(logits_new, logits_old, not_mask):
 
 
 episodes = 1000
+cg_iters = 50
+back_coeff = 0.8
+back_lim = 10
+kl_div_lim = 0.01
 
 def train():
     logits_net.train()
     for ep in range(episodes):
         obs, act, rew, mask = play_episode()
-        # Finish
+        avg_rew = (rew*mask).sum() / batch_size
     
+        if ep % 1 == 0:
+            print(f"Episode {ep:>5d}/{episodes:>5d}")
+            print(f"Average reward = {avg_rew.item():>7f}\n")
+
+        trpo_update(cg_iters, back_coeff, back_lim, kl_div_lim, obs, act, rew, mask)
+
 def test():
     logits_net.eval()
     obs, act, rew, mask = play_episode()
-    # Finish
+    avg_rew = (rew*mask).sum() / batch_size
+    print(f"Average reward = {avg_rew.item():>7f}\n")
+
+train()
+for _ in range(10):
+    test()
