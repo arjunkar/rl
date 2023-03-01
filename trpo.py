@@ -11,8 +11,8 @@ policy is updated in a single "episode".
 CartPole-v1 Results:
 TRPO updates are considerably slower than VPG.
 However, the performance difference is notable.
-After 100 episodes, TRPO hits the CartPole-v1 ceiling
-of 500 reward and shows no instability or notable regression
+After 100 episodes, TRPO hit the CartPole-v1 ceiling
+of 500 reward and showed no instability or notable regression
 in policy performance.
 VPG, on the other hand, hit a ceiling and needed to be cut off
 by hand to prevent significant regression.
