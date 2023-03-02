@@ -11,6 +11,17 @@ Each batch of batch_size rollouts is played simultaneously before the
 policy is updated in a single "episode".
 
 CartPole-v1 Results:
+PPO displays the most impressive learning behavior of the three
+policy optimization algorithms (VPG and TRPO being the other two).
+It is consistent, learns extremely quickly, and is relatively stable.
+In about 40 episodes, it reaches the maximum 500 average reward, which
+is considerably faster than the other algorithms can achieve stably.
+It does suffer from large fluctuations (hundreds of reward) even after
+seemingly stabilizing, but unlike VPG and TRPO it seems to quickly
+recover from these fluctuations and reach peak performance again.
+In a handful of trials, it reached several 500 reward episodes in a
+row by episode 50, and the fluctuations around the maximum were
+only 10-20 reward (excepting the large fluctuations mentioned previously).
 """
 
 
@@ -56,11 +67,60 @@ def play_episode():
     # type_dim e.g. obs_dim or act_dim if multi-dimensional action space
     return obs_seq[:-1], act_seq[1:], rew_seq[1:], torch.logical_not(mask_seq[:-1])
 
-def ppo_update(obs, act, rew, mask):
-    # Finish
-    return
 
-episodes = 1000
+clip_param = 0.1
+kl_div_lim = 0.02
+episodes = 100
+optimizer = torch.optim.Adam(logits_net.parameters())
+
+
+def sample_surr_adv(prob_seq_new, prob_seq_old, weights, not_mask):
+    # Detach old prob_seq to enable .backward derivative only on new,
+    # which computes the vanilla policy gradient
+    return ((prob_seq_new / prob_seq_old.detach()) * weights).sum() / not_mask.sum()
+
+
+def sample_kl_div(logits_new, logits_old, not_mask):
+    policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
+    policy_old = torch.distributions.categorical.Categorical(logits=logits_old)
+    kl = torch.distributions.kl.kl_divergence(policy_new, policy_old)
+    return (kl * not_mask).sum() / not_mask.sum()
+
+def ppo_g_clip(weights):
+    return (1+clip_param)*(weights.relu()) - (1-clip_param)*((-weights).relu())
+
+def ppo_loss(surr_adv, weights):
+    return torch.minimum(surr_adv, ppo_g_clip(weights)).sum() / batch_size
+
+def ppo_update(obs_seq, act_seq, rew_seq, not_mask):
+    logits_old = logits_net(obs_seq)
+    policy_old = torch.distributions.categorical.Categorical(logits=logits_old)
+    prob_seq_old = policy_old.log_prob(act_seq).exp()
+
+    # Total reward weighting:
+    # weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
+    # Reward-to-go weighting:
+    total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
+    avg_rew = total_weights.sum() / batch_size
+    weights = total_weights - (rew_seq*not_mask).cumsum(dim=0)
+
+    logits_new = logits_net(obs_seq)
+    policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
+    prob_seq_new = policy_new.log_prob(act_seq).exp()
+    
+    # Gradient steps with early stopping by KL divergence
+    while sample_kl_div(logits_new, logits_old, not_mask) < kl_div_lim: 
+        surr_adv = sample_surr_adv(prob_seq_new, prob_seq_old, weights, not_mask)
+        loss = -ppo_loss(surr_adv, weights)
+        
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        logits_new = logits_net(obs_seq)
+        policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
+        prob_seq_new = policy_new.log_prob(act_seq).exp()
+
 
 def train():
     logits_net.train()
@@ -71,6 +131,8 @@ def train():
         if ep % 1 == 0:
             print(f"Episode {ep:>5d}/{episodes:>5d}")
             print(f"Average reward = {avg_rew.item():>7f}\n")
+
+        ppo_update(obs, act, rew, mask)
 
 
 def test():
