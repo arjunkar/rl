@@ -1,7 +1,8 @@
 """
 A fully parallel implementation of the Proximal Policy Optimization
 algorithm described in OpenAI's Spinning Up resource.
-Implements reward-to-go but not generalized advantage estimation.
+Implements reward-to-go with value function baseline 
+but not generalized advantage estimation.
 The specific PPO variant we choose is PPO-Clip, without the KL
 divergence term in the objective.
 
@@ -22,6 +23,10 @@ recover from these fluctuations and reach peak performance again.
 In a handful of trials, it reached several 500 reward episodes in a
 row by episode 50, and the fluctuations around the maximum were
 only 10-20 reward (excepting the large fluctuations mentioned previously).
+
+Adding a value function baseline increases training efficiency further,
+and can reach consistent max reward in about half the episodes of a pure
+reward-to-go scheme.
 """
 
 
@@ -29,6 +34,7 @@ import torch
 import numpy as np
 import gymnasium as gym
 import model
+import adv
 
 problem = 'CartPole-v1'
 obs_dim = 4
@@ -39,6 +45,8 @@ env = gym.vector.make(problem, num_envs=batch_size)
 
 hidden_dims = [128, 128]
 logits_net = model.MLP([obs_dim] + hidden_dims + [act_dim])
+value_net = model.MLP([obs_dim] + hidden_dims + [1])
+val_fn = adv.ValueFunction(value_net, batch_size)
 
 def play_episode():
     obs, info = env.reset()
@@ -97,12 +105,11 @@ def ppo_update(obs_seq, act_seq, rew_seq, not_mask):
     policy_old = torch.distributions.categorical.Categorical(logits=logits_old)
     prob_seq_old = policy_old.log_prob(act_seq).exp()
 
-    # Total reward weighting:
-    # weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
-    # Reward-to-go weighting:
+    # Reward-to-go weighting with value function baseline
     total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
-    avg_rew = total_weights.sum() / batch_size
-    weights = total_weights - (rew_seq*not_mask).cumsum(dim=0)
+    reward_to_go = total_weights - (rew_seq*not_mask).cumsum(dim=0)
+    weights = (reward_to_go - val_fn(obs_seq)) * not_mask
+    val_fn.update_value_fn(obs_seq, reward_to_go, not_mask)
 
     logits_new = logits_net(obs_seq)
     policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
@@ -120,6 +127,8 @@ def ppo_update(obs_seq, act_seq, rew_seq, not_mask):
         logits_new = logits_net(obs_seq)
         policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
         prob_seq_new = policy_new.log_prob(act_seq).exp()
+
+    
 
 
 def train():
