@@ -27,6 +27,11 @@ only 10-20 reward (excepting the large fluctuations mentioned previously).
 Adding a value function baseline increases training efficiency further,
 and can reach consistent max reward in about half the episodes of a pure
 reward-to-go scheme.
+
+Generalized advantage estimation does not lead to a notable improvement
+over a value function baseline, perhaps because the problem is too simple
+or the variance effects are too large compared to issues arising when
+bias is introduced.
 """
 
 
@@ -40,13 +45,15 @@ problem = 'CartPole-v1'
 obs_dim = 4
 act_dim = 2
 batch_size = 32
+gamma = 1.
+lambda_ = 1.
 
 env = gym.vector.make(problem, num_envs=batch_size)
 
 hidden_dims = [128, 128]
 logits_net = model.MLP([obs_dim] + hidden_dims + [act_dim])
 value_net = model.MLP([obs_dim] + hidden_dims + [1])
-val_fn = adv.ValueFunction(value_net, batch_size)
+gae_module = adv.GeneralizedAdvantageEstimator(value_net, batch_size, gamma=gamma, lambda_=lambda_)
 
 def play_episode():
     obs, info = env.reset()
@@ -105,11 +112,15 @@ def ppo_update(obs_seq, act_seq, rew_seq, not_mask):
     policy_old = torch.distributions.categorical.Categorical(logits=logits_old)
     prob_seq_old = policy_old.log_prob(act_seq).exp()
 
-    # Reward-to-go weighting with value function baseline
-    total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
-    reward_to_go = total_weights - (rew_seq*not_mask).cumsum(dim=0)
-    weights = (reward_to_go - val_fn.value_fn(obs_seq)) * not_mask
-    val_fn.update_value_fn(obs_seq, reward_to_go, not_mask)
+    # Reward-to-go weighting with generalized advantage estimation
+    # total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
+    # reward_to_go = total_weights - (rew_seq*not_mask).cumsum(dim=0)
+    reward_to_go = rew_seq * not_mask
+    for elem in range(reward_to_go.size()[0]-2, -1, -1):
+        reward_to_go[elem] += gamma * reward_to_go[elem+1]
+    # weights = (reward_to_go - gae_module.value_fn(obs_seq)) * not_mask
+    weights = gae_module.advantage(obs_seq, rew_seq, not_mask)
+    gae_module.update_value_fn(obs_seq, reward_to_go, not_mask)
 
     logits_new = logits_net(obs_seq)
     policy_new = torch.distributions.categorical.Categorical(logits=logits_new)
