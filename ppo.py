@@ -108,7 +108,7 @@ def ppo_update(obs_seq, act_seq, rew_seq, not_mask):
     # Reward-to-go weighting with value function baseline
     total_weights = (rew_seq*not_mask).sum(dim=0, keepdim=True)
     reward_to_go = total_weights - (rew_seq*not_mask).cumsum(dim=0)
-    weights = (reward_to_go - val_fn(obs_seq)) * not_mask
+    weights = (reward_to_go - val_fn.value_fn(obs_seq)) * not_mask
     val_fn.update_value_fn(obs_seq, reward_to_go, not_mask)
 
     logits_new = logits_net(obs_seq)
