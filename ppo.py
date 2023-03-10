@@ -40,6 +40,7 @@ import numpy as np
 import gymnasium as gym
 import model
 import adv
+import os
 
 problem = 'CartPole-v1'
 obs_dim = 4
@@ -164,3 +165,8 @@ def test():
 train()
 for _ in range(10):
     test()
+
+env.close()
+
+torch.save(logits_net.state_dict(),
+    os.path.abspath(os.getcwd()) +  "/rl/cart_model.pth")
